@@ -1,0 +1,20 @@
+{
+  "name": "hackathon-copilot-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Backend for Hackathon Copilot: AI teammate + serverless API + project memory.",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.658.0",
+    "@aws-sdk/client-dynamodb": "^3.658.0",
+    "@aws-sdk/lib-dynamodb": "^3.658.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0"
+  }
+}

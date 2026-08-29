@@ -1,0 +1,184 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Hackathon Copilot - serverless backend (API Gateway + Lambda + DynamoDB +
+  CloudWatch) and static frontend hosting (S3 + CloudFront). Free Tier friendly.
+
+Parameters:
+  BedrockModelId:
+    Type: String
+    Default: amazon.nova-lite-v1:0
+    Description: Bedrock model used for AI enrichment.
+  CorsOrigin:
+    Type: String
+    Default: '*'
+    Description: Allowed CORS origin for the API (set to your CloudFront domain in prod).
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 60
+    MemorySize: 512
+    Architectures: [arm64]
+    Environment:
+      Variables:
+        DYNAMODB_TABLE: !Ref ProjectsTable
+        BEDROCK_MODEL_ID: !Ref BedrockModelId
+        BEDROCK_ENABLED: 'true'
+        CORS_ORIGIN: !Ref CorsOrigin
+        NODE_OPTIONS: '--enable-source-maps'
+
+Resources:
+  # ---- HTTP API with CORS handled at the gateway (incl. OPTIONS preflight) ----
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowHeaders:
+          - '*'
+        AllowMethods:
+          - GET
+          - POST
+          - PATCH
+          - DELETE
+          - OPTIONS
+
+  # ---- Project memory ----
+  ProjectsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+
+  # ---- API + backend logic ----
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/lambda.handler
+      CodeUri: ../.build/lambda
+      Description: Hackathon Copilot API (Express app wrapped for API Gateway).
+      Policies:
+        # Least-privilege: only this table, only the actions we use.
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:DeleteItem
+                - dynamodb:Scan
+              Resource: !GetAtt ProjectsTable.Arn
+        # Bedrock invoke for the configured model only.
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource:
+                - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}'
+      Events:
+        ApiRoot:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /{proxy+}
+            Method: ANY
+        ApiBase:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /
+            Method: ANY
+
+  # CloudWatch log group with a retention policy (cost control + observability).
+  ApiFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ApiFunction}'
+      RetentionInDays: 14
+
+  # ---- Frontend hosting ----
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FrontendOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        # SPA fallback: serve index.html for client-side routes.
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+        Origins:
+          - Id: s3origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !Ref FrontendOAC
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: s3origin
+          ViewerProtocolPolicy: redirect-to-https
+          # AWS managed CachingOptimized policy.
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}'
+
+Outputs:
+  ApiUrl:
+    Description: Base URL of the HTTP API (append /api/...).
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+  ProjectsTableName:
+    Value: !Ref ProjectsTable
+  FrontendBucketName:
+    Description: Upload the built frontend (frontend/dist) here.
+    Value: !Ref FrontendBucket
+  FrontendUrl:
+    Description: Public app URL.
+    Value: !Sub 'https://${FrontendDistribution.DomainName}'

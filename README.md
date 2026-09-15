@@ -1,6 +1,6 @@
 # 🚀 Hackathon Copilot
 
-**From raw idea to working MVP with an AI teammate.**
+**From raw idea to working MVP with an AI teammate**
 
 Hackathon Copilot is an AI-powered development teammate that guides a builder through the full hackathon journey:
 
